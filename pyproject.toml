@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "procblart"
+version = "0.1.0"
+description = "Process Defender TUI"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "psutil>=5.9",
+    "requests>=2.31",
+    "rich>=13.7",
+]
+
+[project.scripts]
+procblart = "process_defender:main"
+
+[tool.setuptools]
+py-modules = ["process_defender"]

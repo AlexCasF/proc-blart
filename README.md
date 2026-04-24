@@ -10,6 +10,7 @@ A Windows-focused process monitor with a terminal UI, policy-based alerts, and o
 - Applies editable rules from `policy.json`
 - Writes alerts and actions as JSONL logs
 - Runs in safe dry-run mode by default
+- Freezes/resumes the live view with `Ctrl+F`
 - Can optionally kill, suspend, dump memory, and quarantine when started with `--execute`
 
 ## Install
@@ -24,6 +25,7 @@ Manual install:
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 py -m pip install -r requirements.txt
+py -m pip install -e .
 ```
 
 ## VirusTotal API Key
@@ -48,41 +50,63 @@ Keep your VirusTotal key private. Do not commit it or hard-code it into scripts.
 
 ## Run
 
+Activate the virtual environment first:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
 Safe dry-run mode:
 
 ```powershell
-.\launch.ps1
+procblart run -dry
 ```
 
 Dry-run mode logs matching policy actions without killing, suspending, dumping, or quarantining processes.
 
-Explicit dry-run mode:
+Execute mode:
 
 ```powershell
-.\launch.ps1 -DryRun
+procblart run -exec
 ```
 
-Run in the current terminal instead of opening Windows Terminal panes:
+Use execute mode only in a lab VM. Run from an elevated terminal if process-control actions need to work reliably.
+
+During a live run, press `Ctrl+F` to freeze or resume the display.
+
+You can also use the PowerShell launcher:
+
+```powershell
+.\launch.ps1
+.\launch.ps1 -DryRun
+.\launch.ps1 -Execute
+```
+
+Run the launcher in the current terminal instead of opening Windows Terminal panes:
 
 ```powershell
 .\launch.ps1 -DryRun -CurrentTerminal
 ```
 
-Execute mode:
-
-```powershell
-.\launch.ps1 -Execute
-```
-
-Use execute mode only in a lab VM. Run from an elevated terminal if process-control actions need to work reliably.
+The launcher also accepts `-Policy`, `-Workdir`, `-Interval`, and `-MaxRows`.
 
 ## Scan a File
 
 ```powershell
-.\launch.ps1 -ScanFile .\path\to\file.exe
+procblart scan .\path\to\file.exe
 ```
 
-The launcher also accepts `-Policy`, `-Workdir`, `-Interval`, and `-MaxRows`.
+Redirect scan output to save a JSON result:
+
+```powershell
+procblart scan .\path\to\file.exe > result.json
+```
+
+PowerShell launcher equivalent:
+
+```powershell
+.\launch.ps1 -ScanFile .\path\to\file.exe
+```
 
 ## Logs
 
@@ -104,9 +128,9 @@ defender_data\logs\manual_scan.jsonl
 Tail logs:
 
 ```powershell
-.\.venv\Scripts\python.exe process_defender.py tail --log alerts
-.\.venv\Scripts\python.exe process_defender.py tail --log actions
-.\.venv\Scripts\python.exe process_defender.py tail --log virustotal
+procblart tail --log alerts
+procblart tail --log actions
+procblart tail --log virustotal
 ```
 
 ## Policy

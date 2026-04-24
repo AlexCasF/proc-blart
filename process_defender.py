@@ -1,27 +1,4 @@
 #!/usr/bin/env python3
-"""
-Process Defender TUI
-A small Windows-focused "process monitoring antivirus" school project.
-
-Features:
-- Live process table with PID, CPU, memory, executable path and VirusTotal status.
-- SHA-256 based VirusTotal v3 file reputation lookup with local cache and rate limit.
-- JSON policy rules for warnings and automated reactions.
-- Dry-run mode by default. Use --execute only inside a lab VM.
-- Optional ProcDump integration for memory dumps.
-
-Install:
-    py -m pip install -r requirements.txt
-
-Run:
-    set VIRUSTOTAL_API_KEY=your_key_here
-    py process_defender.py monitor
-
-Dangerous actions are simulated by default. To actually kill/suspend/quarantine:
-    py process_defender.py monitor --execute
-
-This is educational code, not production EDR software.
-"""
 
 from __future__ import annotations
 
@@ -592,6 +569,58 @@ class Responder:
         )
 
 
+class KeyboardWatcher:
+    def __init__(self, on_freeze_toggle: Any) -> None:
+        self.on_freeze_toggle = on_freeze_toggle
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread or not sys.stdin.isatty():
+            return
+        target = self._run_windows if os.name == "nt" else self._run_posix
+        self._thread = threading.Thread(target=target, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=1)
+
+    def _handle_key(self, key: str) -> None:
+        if key == "\x06":  # Ctrl+F
+            self.on_freeze_toggle()
+
+    def _run_windows(self) -> None:
+        import msvcrt
+
+        while not self._stop.is_set():
+            if not msvcrt.kbhit():
+                time.sleep(0.05)
+                continue
+            key = msvcrt.getwch()
+            if key in {"\x00", "\xe0"}:
+                msvcrt.getwch()
+                continue
+            self._handle_key(key)
+
+    def _run_posix(self) -> None:
+        import select
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            while not self._stop.is_set():
+                ready, _, _ = select.select([sys.stdin], [], [], 0.05)
+                if ready:
+                    self._handle_key(sys.stdin.read(1))
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
 class ProcessMonitorApp:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -628,10 +657,19 @@ class ProcessMonitorApp:
         self.rows: list[ProcessRow] = []
         self.start_time = time.time()
         self.max_new_paths_per_cycle = int(vt_cfg.get("max_new_paths_per_cycle", 4))
+        self.frozen = threading.Event()
+        self.keyboard = KeyboardWatcher(self.toggle_freeze)
+
+    def toggle_freeze(self) -> None:
+        if self.frozen.is_set():
+            self.frozen.clear()
+        else:
+            self.frozen.set()
 
     def run(self) -> None:
         self.alert_log.write({"type": "startup", "mode": "execute" if self.args.execute else "dry_run"})
         self.vt_scanner.start()
+        self.keyboard.start()
 
         # Prime per-process CPU counters. First cpu_percent(None) call is usually 0.0.
         for p in psutil.process_iter(["pid"]):
@@ -640,11 +678,20 @@ class ProcessMonitorApp:
             except Exception:
                 pass
 
-        with Live(self._render(), console=self.console, refresh_per_second=2, screen=True) as live:
-            while True:
-                self.rows = self._collect_processes()
-                live.update(self._render())
-                time.sleep(float(self.args.interval))
+        try:
+            with Live(self._render(), console=self.console, refresh_per_second=2, screen=True, auto_refresh=False) as live:
+                last_frozen_state = self.frozen.is_set()
+                while True:
+                    frozen = self.frozen.is_set()
+                    if not frozen:
+                        self.rows = self._collect_processes()
+                        live.update(self._render(), refresh=True)
+                    elif frozen != last_frozen_state:
+                        live.update(self._render(), refresh=True)
+                    last_frozen_state = frozen
+                    time.sleep(float(self.args.interval))
+        finally:
+            self.keyboard.stop()
 
     def _collect_processes(self) -> list[ProcessRow]:
         rows: list[ProcessRow] = []
@@ -712,15 +759,17 @@ class ProcessMonitorApp:
         mode = "[bold red]EXECUTE[/bold red]" if self.args.execute else "[bold yellow]DRY RUN[/bold yellow]"
         api = "[green]enabled[/green]" if os.getenv("VIRUSTOTAL_API_KEY") else "[red]missing key[/red]"
         uptime = int(time.time() - self.start_time)
+        freeze = "[bold cyan]FROZEN[/bold cyan] | Ctrl+F resume" if self.frozen.is_set() else "Ctrl+F freeze"
         text = (
             f"[bold]{APP_NAME}[/bold] | mode: {mode} | VT: {api} | "
-            f"queue: {self.vt_scanner.queue_size} | uptime: {uptime}s | Ctrl+C to exit"
+            f"queue: {self.vt_scanner.queue_size} | uptime: {uptime}s | {freeze} | Ctrl+C exit"
         )
         return Panel(Align.left(text), box=box.SIMPLE)
 
     def _footer(self) -> Panel:
+        shown = min(len(self.rows), int(self.args.max_rows))
         return Panel(
-            "Policy is loaded from policy.json. Logs: "
+            f"Policy: {self.args.policy} | Showing top {shown}/{len(self.rows)} processes | Logs: "
             f"{self.workdir / 'logs' / 'alerts.jsonl'} and {self.workdir / 'logs' / 'actions.jsonl'}",
             box=box.SIMPLE,
         )
@@ -839,7 +888,7 @@ def tail_log(path: Path, interval: float = 0.5) -> None:
                 console.print(line.rstrip())
 
 
-def scan_file_once(path: Path, policy_path: Path | None, workdir: Path) -> None:
+def scan_file_once(path: Path, policy_path: Path | None, workdir: Path, output_json: bool = False) -> None:
     console = Console()
     policy = load_policy(policy_path)
     log = JsonlLog(workdir / "logs" / "manual_scan.jsonl")
@@ -854,6 +903,12 @@ def scan_file_once(path: Path, policy_path: Path | None, workdir: Path) -> None:
         log=log,
     )
     result = client.lookup_path(str(path))
+
+    if output_json or not sys.stdout.isatty():
+        payload = {"path": str(path), "detections": result.detections, **result.to_json()}
+        print(json.dumps(payload, indent=2))
+        return
+
     table = Table(title=f"VirusTotal scan: {path.name}", box=box.SIMPLE_HEAVY)
     table.add_column("Field")
     table.add_column("Value")
@@ -918,47 +973,77 @@ def is_admin() -> bool:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=APP_NAME)
+    parser = argparse.ArgumentParser(prog="procblart", description=APP_NAME)
     sub = parser.add_subparsers(dest="command", required=True)
 
+    def add_monitor_args(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--interval", type=float, default=2.0, help="Refresh interval in seconds")
+        p.add_argument("--max-rows", type=int, default=30, help="Max process rows to display")
+        p.add_argument("--policy", type=Path, default=Path("policy.json"), help="Path to policy JSON")
+        p.add_argument("--workdir", type=Path, default=DEFAULT_WORKDIR, help="Data folder for logs/cache/dumps/quarantine")
+        p.add_argument("-dry", "--dry", "--dry-run", dest="dry_run", action="store_true", help="Run in dry-run mode (default)")
+        p.add_argument(
+            "-exec",
+            "--exec",
+            "--execute",
+            dest="execute",
+            action="store_true",
+            help="Actually perform kill/suspend/quarantine actions",
+        )
+
+    def add_scan_args(p: argparse.ArgumentParser) -> None:
+        p.add_argument("path", type=Path)
+        p.add_argument("--policy", type=Path, default=Path("policy.json"))
+        p.add_argument("--workdir", type=Path, default=DEFAULT_WORKDIR)
+        p.add_argument("--json", action="store_true", help="Write JSON result to stdout")
+
+    run = sub.add_parser("run", help="Run live process monitor TUI")
+    add_monitor_args(run)
+    run.set_defaults(action="monitor")
+
     monitor = sub.add_parser("monitor", help="Run live process monitor TUI")
-    monitor.add_argument("--interval", type=float, default=2.0, help="Refresh interval in seconds")
-    monitor.add_argument("--max-rows", type=int, default=30, help="Max process rows to display")
-    monitor.add_argument("--policy", type=Path, default=Path("policy.json"), help="Path to policy JSON")
-    monitor.add_argument("--workdir", type=Path, default=DEFAULT_WORKDIR, help="Data folder for logs/cache/dumps/quarantine")
-    monitor.add_argument("--execute", action="store_true", help="Actually perform kill/suspend/quarantine actions")
+    add_monitor_args(monitor)
+    monitor.set_defaults(action="monitor")
+
+    scan = sub.add_parser("scan", help="Scan one file with VirusTotal hash lookup/upload policy")
+    add_scan_args(scan)
+    scan.set_defaults(action="scan-file")
 
     scan = sub.add_parser("scan-file", help="Scan one file with VirusTotal hash lookup/upload policy")
-    scan.add_argument("path", type=Path)
-    scan.add_argument("--policy", type=Path, default=Path("policy.json"))
-    scan.add_argument("--workdir", type=Path, default=DEFAULT_WORKDIR)
+    add_scan_args(scan)
+    scan.set_defaults(action="scan-file")
 
     tail = sub.add_parser("tail", help="Tail JSONL logs")
     tail.add_argument("--workdir", type=Path, default=DEFAULT_WORKDIR)
     tail.add_argument("--log", choices=["alerts", "actions", "virustotal", "manual_scan"], default="alerts")
 
-    sub.add_parser("write-default-policy", help="Write default policy.json")
+    write_policy = sub.add_parser("write-default-policy", help="Write default policy.json")
+    write_policy.set_defaults(action="write-default-policy")
 
     return parser
 
 
 def main() -> int:
-    args = build_arg_parser().parse_args()
+    parser = build_arg_parser()
+    args = parser.parse_args()
+    action = getattr(args, "action", args.command)
 
-    if args.command == "write-default-policy":
+    if action == "write-default-policy":
         write_default_policy(Path("policy.json"))
         return 0
 
-    if args.command == "tail":
+    if action == "tail":
         log_path = args.workdir / "logs" / f"{args.log}.jsonl"
         tail_log(log_path)
         return 0
 
-    if args.command == "scan-file":
-        scan_file_once(args.path, args.policy if args.policy.exists() else None, args.workdir)
+    if action == "scan-file":
+        scan_file_once(args.path, args.policy if args.policy.exists() else None, args.workdir, output_json=args.json)
         return 0
 
-    if args.command == "monitor":
+    if action == "monitor":
+        if args.dry_run and args.execute:
+            parser.error("Choose dry-run or execute mode, not both.")
         if args.execute and not is_admin():
             Console().print(
                 "[bold red]Warning:[/bold red] --execute was requested but this terminal is probably not elevated. "

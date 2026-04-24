@@ -44,7 +44,7 @@ To set it persistently for future terminal sessions:
 setx VIRUSTOTAL_API_KEY "paste_key_here"
 ```
 
-After using `setx`, open a new terminal before starting the monitor.
+After using `setx`, open a new terminal before starting the monitor. On Windows, `procblart` also checks persisted User and Machine environment variables if the current terminal has not inherited the key yet.
 
 Keep your VirusTotal key private. Do not commit it or hard-code it into scripts. The default policy does not upload unknown files, and the default `rate_limit_seconds` value is `16`, which keeps lookups under the free public API limit of 4 requests per minute. Free public API access is for personal, non-commercial use.
 
@@ -72,7 +72,29 @@ procblart run -exec
 
 Use execute mode only in a lab VM. Run from an elevated terminal if process-control actions need to work reliably.
 
-During a live run, press `Ctrl+F` to freeze or resume the display.
+Live controls:
+
+- `Space`: freeze or resume the display
+- `PageUp` / `PageDown`: scroll by one page
+- `Up` / `Down`: scroll by one row
+- `Home` / `End`: jump to the first or last row
+- `s`: cycle sort order
+- `r`: reverse the current sort
+
+Read-only remote monitor for one Windows LAN host:
+
+```powershell
+procblart run -remote 192.168.1.25
+```
+
+Remote mode uses PowerShell CIM/WMI from the local machine, does not perform VirusTotal lookups, and does not kill, suspend, dump, or quarantine remote processes. The target must allow remote CIM/WinRM access for your account.
+
+Typical remote requirements:
+
+- The target computer has WinRM/CIM remote management enabled.
+- Windows Firewall allows WinRM traffic from your management machine.
+- Your account has permission to query CIM/WMI on the target.
+- Domain/Kerberos works by name, or the host is configured appropriately for trusted-host/non-domain access.
 
 You can also use the PowerShell launcher:
 
@@ -80,6 +102,7 @@ You can also use the PowerShell launcher:
 .\launch.ps1
 .\launch.ps1 -DryRun
 .\launch.ps1 -Execute
+.\launch.ps1 -Remote 192.168.1.25
 ```
 
 Run the launcher in the current terminal instead of opening Windows Terminal panes:

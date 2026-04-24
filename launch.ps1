@@ -5,6 +5,7 @@ param(
     [switch]$DryRun,
     [switch]$Execute,
     [string]$ScanFile,
+    [string]$Remote,
     [string]$Policy = "policy.json",
     [string]$Workdir = "defender_data",
     [double]$Interval = 2.0,
@@ -20,6 +21,12 @@ Set-Location $Root
 $SelectedModes = @($DryRun.IsPresent, $Execute.IsPresent, -not [string]::IsNullOrWhiteSpace($ScanFile)) | Where-Object { $_ }
 if ($SelectedModes.Count -gt 1) {
     throw "Choose only one mode: -DryRun, -Execute, or -ScanFile <path>."
+}
+if ($ScanFile -and -not [string]::IsNullOrWhiteSpace($Remote)) {
+    throw "-Remote only applies to monitor mode."
+}
+if ($Execute -and -not [string]::IsNullOrWhiteSpace($Remote)) {
+    throw "Remote mode is read-only. Use -Remote without -Execute."
 }
 
 $PythonPath = Join-Path $Root ".venv\Scripts\python.exe"
@@ -59,6 +66,10 @@ $MonitorArgs = @(
     "--workdir", $ResolvedWorkdir
 )
 $Title = "Monitor (Dry Run)"
+if ($Remote) {
+    $MonitorArgs += @("--remote", $Remote)
+    $Title = "Remote $Remote"
+}
 if ($Execute) {
     $MonitorArgs += "--execute"
     $Title = "Monitor (Execute)"

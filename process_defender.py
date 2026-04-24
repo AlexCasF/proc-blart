@@ -35,6 +35,13 @@ DEFAULT_WORKDIR = Path.cwd() / "defender_data"
 VT_FILE_REPORT_URL = "https://www.virustotal.com/api/v3/files/{sha256}"
 VT_UPLOAD_URL = "https://www.virustotal.com/api/v3/files"
 MB = 1024 * 1024
+SORT_MODES = [
+    ("memory", "Mem MB", True),
+    ("cpu", "CPU %", True),
+    ("started", "Started", True),
+    ("pid", "PID", False),
+    ("name", "Name", False),
+]
 
 
 DEFAULT_POLICY: dict[str, Any] = {
@@ -100,7 +107,7 @@ DEFAULT_POLICY: dict[str, Any] = {
 
 @dataclass
 class VTResult:
-    status: str = "pending"  # disabled, queued, pending, clean, suspicious, malicious, unknown, submitted, error
+    status: str = "pending"  # disabled, queued, pending, clean, suspicious, malicious, unknown, submitted, remote, error
     sha256: str | None = None
     malicious: int = 0
     suspicious: int = 0
@@ -146,9 +153,111 @@ class ProcessRow:
     username: str = ""
     cpu_percent: float = 0.0
     memory_mb: float = 0.0
+    started_epoch: float = 0.0
+    started_at: str = ""
     exe: str = ""
     vt: VTResult = field(default_factory=VTResult)
     policy_hits: list[str] = field(default_factory=list)
+
+
+class RemoteProcessCollector:
+    def __init__(self, host: str, timeout: float = 15.0) -> None:
+        self.host = host
+        self.timeout = timeout
+        self.last_error = ""
+
+    def collect(self) -> list[ProcessRow]:
+        if os.name != "nt":
+            raise RuntimeError("Remote CIM collection is only supported from Windows.")
+        powershell = shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            raise RuntimeError("PowerShell was not found.")
+        validate_remote_host(self.host)
+        host_literal = "'" + self.host.replace("'", "''") + "'"
+
+        script = f"$ComputerName = {host_literal}\n" + r"""
+$ErrorActionPreference = "Stop"
+
+$IsLocal = $ComputerName -in @(".", "localhost", "127.0.0.1", "::1", $env:COMPUTERNAME)
+if ($IsLocal) {
+    $Processes = Get-CimInstance -ClassName Win32_Process
+    $Perf = Get-CimInstance -ClassName Win32_PerfFormattedData_PerfProc_Process
+} else {
+    $Processes = Get-CimInstance -ComputerName $ComputerName -ClassName Win32_Process
+    $Perf = Get-CimInstance -ComputerName $ComputerName -ClassName Win32_PerfFormattedData_PerfProc_Process
+}
+
+$CpuByPid = @{}
+foreach ($Counter in $Perf) {
+    if ($null -ne $Counter.IDProcess) {
+        $CpuByPid[[int]$Counter.IDProcess] = [double]$Counter.PercentProcessorTime
+    }
+}
+
+$Rows = @(
+    foreach ($Process in $Processes) {
+        $PidValue = [int]$Process.ProcessId
+        $CpuValue = 0.0
+        if ($CpuByPid.ContainsKey($PidValue)) {
+            $CpuValue = [double]$CpuByPid[$PidValue]
+        }
+        $StartedEpoch = 0
+        $StartedAt = ""
+        if ($Process.CreationDate) {
+            $StartedDate = [datetime]$Process.CreationDate
+            $StartedEpoch = ([DateTimeOffset]$StartedDate.ToUniversalTime()).ToUnixTimeSeconds()
+            $StartedAt = $StartedDate.ToString("MM-dd HH:mm:ss")
+        }
+
+        [pscustomobject]@{
+            pid = $PidValue
+            name = [string]$Process.Name
+            username = ""
+            exe = [string]$Process.ExecutablePath
+            cpu_percent = $CpuValue
+            memory_mb = [math]::Round(([double]$Process.WorkingSetSize / 1MB), 1)
+            started_epoch = $StartedEpoch
+            started_at = $StartedAt
+        }
+    }
+)
+
+ConvertTo-Json -InputObject $Rows -Compress -Depth 3
+"""
+        result = subprocess.run(
+            [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=self.timeout,
+            check=False,
+        )
+        if result.returncode != 0:
+            message = result.stderr.strip() or result.stdout.strip() or f"PowerShell exited with {result.returncode}"
+            raise RuntimeError(message)
+        if not result.stdout.strip():
+            return []
+
+        data = json.loads(result.stdout)
+        if isinstance(data, dict):
+            data = [data]
+
+        rows: list[ProcessRow] = []
+        for item in data:
+            rows.append(
+                ProcessRow(
+                    pid=int(item.get("pid") or 0),
+                    name=str(item.get("name") or ""),
+                    username=str(item.get("username") or ""),
+                    cpu_percent=float(item.get("cpu_percent") or 0.0),
+                    memory_mb=float(item.get("memory_mb") or 0.0),
+                    started_epoch=float(item.get("started_epoch") or 0.0),
+                    started_at=str(item.get("started_at") or ""),
+                    exe=str(item.get("exe") or ""),
+                    vt=VTResult(status="remote", message="VirusTotal lookup disabled in remote mode"),
+                )
+            )
+        self.last_error = ""
+        return rows
 
 
 class JsonlLog:
@@ -570,8 +679,8 @@ class Responder:
 
 
 class KeyboardWatcher:
-    def __init__(self, on_freeze_toggle: Any) -> None:
-        self.on_freeze_toggle = on_freeze_toggle
+    def __init__(self, on_key: Any) -> None:
+        self.on_key = on_key
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -588,8 +697,7 @@ class KeyboardWatcher:
             self._thread.join(timeout=1)
 
     def _handle_key(self, key: str) -> None:
-        if key == "\x06":  # Ctrl+F
-            self.on_freeze_toggle()
+        self.on_key(key)
 
     def _run_windows(self) -> None:
         import msvcrt
@@ -600,8 +708,21 @@ class KeyboardWatcher:
                 continue
             key = msvcrt.getwch()
             if key in {"\x00", "\xe0"}:
-                msvcrt.getwch()
+                special = msvcrt.getwch()
+                special_keys = {
+                    "H": "up",
+                    "P": "down",
+                    "I": "page_up",
+                    "Q": "page_down",
+                    "G": "home",
+                    "O": "end",
+                }
+                mapped = special_keys.get(special)
+                if mapped:
+                    self._handle_key(mapped)
                 continue
+            if key == " ":
+                key = "space"
             self._handle_key(key)
 
     def _run_posix(self) -> None:
@@ -616,9 +737,34 @@ class KeyboardWatcher:
             while not self._stop.is_set():
                 ready, _, _ = select.select([sys.stdin], [], [], 0.05)
                 if ready:
-                    self._handle_key(sys.stdin.read(1))
+                    key = sys.stdin.read(1)
+                    if key == "\x1b":
+                        key = self._read_posix_escape_sequence()
+                    elif key == " ":
+                        key = "space"
+                    self._handle_key(key)
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    def _read_posix_escape_sequence(self) -> str:
+        import select
+
+        sequence = "\x1b"
+        while True:
+            ready, _, _ = select.select([sys.stdin], [], [], 0.01)
+            if not ready:
+                break
+            sequence += sys.stdin.read(1)
+            if sequence in {"\x1b[A", "\x1b[B", "\x1b[H", "\x1b[F", "\x1b[5~", "\x1b[6~"}:
+                break
+        return {
+            "\x1b[A": "up",
+            "\x1b[B": "down",
+            "\x1b[5~": "page_up",
+            "\x1b[6~": "page_down",
+            "\x1b[H": "home",
+            "\x1b[F": "end",
+        }.get(sequence, sequence)
 
 
 class ProcessMonitorApp:
@@ -635,7 +781,7 @@ class ProcessMonitorApp:
         self.vt_log = JsonlLog(self.workdir / "logs" / "virustotal.jsonl")
 
         vt_cfg = self.policy.get("virustotal", {})
-        api_key = os.getenv("VIRUSTOTAL_API_KEY")
+        api_key = get_virustotal_api_key()
         self.vt_client = VirusTotalClient(
             api_key=api_key,
             cache_path=self.workdir / "cache" / "vt_cache.json",
@@ -658,25 +804,82 @@ class ProcessMonitorApp:
         self.start_time = time.time()
         self.max_new_paths_per_cycle = int(vt_cfg.get("max_new_paths_per_cycle", 4))
         self.frozen = threading.Event()
-        self.keyboard = KeyboardWatcher(self.toggle_freeze)
+        self.needs_render = threading.Event()
+        self.scroll_offset = 0
+        self.sort_mode_index = 0
+        self.sort_desc = SORT_MODES[self.sort_mode_index][2]
+        self.keyboard = KeyboardWatcher(self.handle_key)
+        self.remote_host = str(getattr(args, "remote", "") or "")
+        self.remote_collector = (
+            RemoteProcessCollector(self.remote_host, timeout=float(getattr(args, "remote_timeout", 15.0)))
+            if self.remote_host
+            else None
+        )
+        self.remote_acted: set[str] = set()
+        self.remote_error = ""
 
-    def toggle_freeze(self) -> None:
-        if self.frozen.is_set():
-            self.frozen.clear()
-        else:
-            self.frozen.set()
+    def handle_key(self, key: str) -> None:
+        if key == "space":
+            if self.frozen.is_set():
+                self.frozen.clear()
+            else:
+                self.frozen.set()
+            self.needs_render.set()
+            return
+
+        if key in {"up", "down", "page_up", "page_down", "home", "end"}:
+            self._scroll(key)
+            self.needs_render.set()
+            return
+
+        if key.lower() == "s":
+            self.sort_mode_index = (self.sort_mode_index + 1) % len(SORT_MODES)
+            self.sort_desc = SORT_MODES[self.sort_mode_index][2]
+            self.rows = self._sort_rows(self.rows)
+            self._clamp_scroll()
+            self.needs_render.set()
+            return
+
+        if key.lower() == "r":
+            self.sort_desc = not self.sort_desc
+            self.rows = self._sort_rows(self.rows)
+            self._clamp_scroll()
+            self.needs_render.set()
+
+    def _scroll(self, key: str) -> None:
+        page = max(1, int(self.args.max_rows))
+        if key == "up":
+            self.scroll_offset -= 1
+        elif key == "down":
+            self.scroll_offset += 1
+        elif key == "page_up":
+            self.scroll_offset -= page
+        elif key == "page_down":
+            self.scroll_offset += page
+        elif key == "home":
+            self.scroll_offset = 0
+        elif key == "end":
+            self.scroll_offset = max(0, len(self.rows) - page)
+        self._clamp_scroll()
+
+    def _clamp_scroll(self) -> None:
+        max_offset = max(0, len(self.rows) - max(1, int(self.args.max_rows)))
+        self.scroll_offset = min(max(0, self.scroll_offset), max_offset)
 
     def run(self) -> None:
-        self.alert_log.write({"type": "startup", "mode": "execute" if self.args.execute else "dry_run"})
-        self.vt_scanner.start()
+        startup_mode = "remote_readonly" if self.remote_collector else "execute" if self.args.execute else "dry_run"
+        self.alert_log.write({"type": "startup", "mode": startup_mode, "remote": self.remote_host})
+        if not self.remote_collector:
+            self.vt_scanner.start()
         self.keyboard.start()
 
-        # Prime per-process CPU counters. First cpu_percent(None) call is usually 0.0.
-        for p in psutil.process_iter(["pid"]):
-            try:
-                p.cpu_percent(interval=None)
-            except Exception:
-                pass
+        if not self.remote_collector:
+            # Prime per-process CPU counters. First cpu_percent(None) call is usually 0.0.
+            for p in psutil.process_iter(["pid"]):
+                try:
+                    p.cpu_percent(interval=None)
+                except Exception:
+                    pass
 
         try:
             with Live(self._render(), console=self.console, refresh_per_second=2, screen=True, auto_refresh=False) as live:
@@ -685,15 +888,21 @@ class ProcessMonitorApp:
                     frozen = self.frozen.is_set()
                     if not frozen:
                         self.rows = self._collect_processes()
+                        self._clamp_scroll()
                         live.update(self._render(), refresh=True)
-                    elif frozen != last_frozen_state:
+                        self.needs_render.clear()
+                    elif frozen != last_frozen_state or self.needs_render.is_set():
                         live.update(self._render(), refresh=True)
+                        self.needs_render.clear()
                     last_frozen_state = frozen
                     time.sleep(float(self.args.interval))
         finally:
             self.keyboard.stop()
 
     def _collect_processes(self) -> list[ProcessRow]:
+        if self.remote_collector:
+            return self._collect_remote_processes()
+
         rows: list[ProcessRow] = []
         submitted_this_cycle = 0
 
@@ -706,6 +915,8 @@ class ProcessMonitorApp:
                     exe = proc.exe() or ""
                     cpu = proc.cpu_percent(interval=None)
                     mem = proc.memory_info().rss / MB
+                    started_epoch = float(proc.create_time() or 0.0)
+                    started_at = format_epoch_for_display(started_epoch)
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
             except Exception:
@@ -722,6 +933,8 @@ class ProcessMonitorApp:
                 username=username,
                 cpu_percent=cpu,
                 memory_mb=mem,
+                started_epoch=started_epoch,
+                started_at=started_at,
                 exe=exe,
                 vt=vt_result,
             )
@@ -734,8 +947,81 @@ class ProcessMonitorApp:
                     pass
             rows.append(row)
 
-        rows.sort(key=lambda r: (r.vt.detections, r.memory_mb, r.cpu_percent), reverse=True)
-        return rows
+        return self._sort_rows(rows)
+
+    def _collect_remote_processes(self) -> list[ProcessRow]:
+        assert self.remote_collector is not None
+        try:
+            rows = self.remote_collector.collect()
+            self.remote_error = ""
+        except Exception as e:
+            self.remote_error = str(e)
+            self.alert_log.write({"type": "remote_error", "message": self.remote_error, "remote": self.remote_host})
+            return self.rows
+
+        for row in rows:
+            rules = self.policy_engine.evaluate(row)
+            if not rules:
+                continue
+            row.policy_hits = [str(r.get("id", "unnamed-rule")) for r in rules]
+            self._record_remote_policy_hit(row, rules)
+
+        return self._sort_rows(rows)
+
+    def _sort_rows(self, rows: list[ProcessRow]) -> list[ProcessRow]:
+        mode = SORT_MODES[self.sort_mode_index][0]
+        key_funcs = {
+            "memory": lambda r: (r.memory_mb, r.cpu_percent, r.pid),
+            "cpu": lambda r: (r.cpu_percent, r.memory_mb, r.pid),
+            "started": lambda r: (r.started_epoch, r.pid),
+            "pid": lambda r: (r.pid,),
+            "name": lambda r: (r.name.lower(), r.pid),
+        }
+        return sorted(rows, key=key_funcs[mode], reverse=self.sort_desc)
+
+    def _record_remote_policy_hit(self, row: ProcessRow, rules: list[dict[str, Any]]) -> None:
+        for rule in rules:
+            rule_id = str(rule.get("id", "unnamed-rule"))
+            action_key = f"remote:{self.remote_host}:{rule_id}:{row.pid}:{row.exe}:{int(row.memory_mb)}"
+            if action_key in self.remote_acted:
+                continue
+            self.remote_acted.add(action_key)
+
+            actions = [str(a) for a in rule.get("actions", [])]
+            self.alert_log.write(
+                {
+                    "type": "policy_hit",
+                    "rule_id": rule_id,
+                    "description": rule.get("description", ""),
+                    "pid": row.pid,
+                    "name": row.name,
+                    "exe": row.exe,
+                    "memory_mb": round(row.memory_mb, 1),
+                    "vt_status": row.vt.status,
+                    "vt_detections": row.vt.detections,
+                    "actions": actions,
+                    "mode": "remote_readonly",
+                    "remote": self.remote_host,
+                }
+            )
+            for action in actions:
+                result = "logged" if action == "log_warning" else "skipped"
+                detail = "Remote mode is read-only" if action != "log_warning" else f"Memory usage {row.memory_mb:.1f} MB"
+                self.action_log.write(
+                    {
+                        "type": "action",
+                        "rule_id": rule_id,
+                        "action": action,
+                        "result": result,
+                        "detail": detail,
+                        "pid": row.pid,
+                        "name": row.name,
+                        "exe": row.exe,
+                        "vt_status": row.vt.status,
+                        "vt_detections": row.vt.detections,
+                        "remote": self.remote_host,
+                    }
+                )
 
     def _render(self) -> Layout:
         layout = Layout(name="root")
@@ -756,20 +1042,31 @@ class ProcessMonitorApp:
         return layout
 
     def _header(self) -> Panel:
-        mode = "[bold red]EXECUTE[/bold red]" if self.args.execute else "[bold yellow]DRY RUN[/bold yellow]"
-        api = "[green]enabled[/green]" if os.getenv("VIRUSTOTAL_API_KEY") else "[red]missing key[/red]"
+        if self.remote_collector:
+            mode = "[bold cyan]REMOTE READ-ONLY[/bold cyan]"
+            api = "[dim]disabled[/dim]"
+            source = f"remote: [bold]{self.remote_host}[/bold]"
+        else:
+            mode = "[bold red]EXECUTE[/bold red]" if self.args.execute else "[bold yellow]DRY RUN[/bold yellow]"
+            api = "[green]enabled[/green]" if get_virustotal_api_key() else "[red]missing key[/red]"
+            source = "local"
         uptime = int(time.time() - self.start_time)
         freeze = "[bold cyan]FROZEN[/bold cyan] | Ctrl+F resume" if self.frozen.is_set() else "Ctrl+F freeze"
         text = (
-            f"[bold]{APP_NAME}[/bold] | mode: {mode} | VT: {api} | "
-            f"queue: {self.vt_scanner.queue_size} | uptime: {uptime}s | {freeze} | Ctrl+C exit"
+            f"[bold]{APP_NAME}[/bold] | source: {source} | mode: {mode} | VT: {api} | "
+            f"queue: {self.vt_scanner.queue_size} | uptime: {uptime}s | {freeze} | PgUp/PgDn scroll | s sort | r reverse | Ctrl+C exit"
         )
         return Panel(Align.left(text), box=box.SIMPLE)
 
     def _footer(self) -> Panel:
-        shown = min(len(self.rows), int(self.args.max_rows))
+        total = len(self.rows)
+        shown = min(total, int(self.args.max_rows))
+        first = 0 if total == 0 else self.scroll_offset + 1
+        last = min(total, self.scroll_offset + shown)
+        sort_name = SORT_MODES[self.sort_mode_index][1]
+        sort_dir = "desc" if self.sort_desc else "asc"
         return Panel(
-            f"Policy: {self.args.policy} | Showing top {shown}/{len(self.rows)} processes | Logs: "
+            f"Policy: {self.args.policy} | Showing {first}-{last}/{total} | Sort: {sort_name} {sort_dir} | Logs: "
             f"{self.workdir / 'logs' / 'alerts.jsonl'} and {self.workdir / 'logs' / 'actions.jsonl'}",
             box=box.SIMPLE,
         )
@@ -783,9 +1080,11 @@ class ProcessMonitorApp:
         table.add_column("VT", justify="center")
         table.add_column("Det", justify="right")
         table.add_column("Policy")
+        table.add_column("Started", no_wrap=True)
         table.add_column("Executable", overflow="fold")
 
-        for row in self.rows[: self.args.max_rows]:
+        visible_rows = self.rows[self.scroll_offset : self.scroll_offset + self.args.max_rows]
+        for row in visible_rows:
             style = ""
             if row.vt.detections > int(self.policy.get("vt_detection_threshold", 3)):
                 style = "bold red"
@@ -802,13 +1101,27 @@ class ProcessMonitorApp:
                 self._format_vt(row.vt),
                 str(row.vt.detections),
                 ",".join(row.policy_hits),
+                row.started_at,
                 row.exe,
                 style=style,
             )
 
-        return Panel(table, title="Live processes", border_style="cyan")
+        sort_name = SORT_MODES[self.sort_mode_index][1]
+        sort_dir = "desc" if self.sort_desc else "asc"
+        return Panel(table, title=f"Live processes | sort: {sort_name} {sort_dir}", border_style="cyan")
 
     def _vt_panel(self) -> Panel:
+        if self.remote_collector:
+            lines = [
+                f"Host: {self.remote_host}",
+                "Mode: read-only",
+                "Collector: PowerShell CIM/WMI",
+                "VirusTotal: disabled",
+            ]
+            if self.remote_error:
+                lines.extend(["", "[bold red]Last error[/bold red]", self.remote_error[:500]])
+            return Panel("\n".join(lines), title="Remote", border_style="magenta")
+
         lines = [
             f"Scanned: {self.vt_scanner.scanned_count}",
             f"Errors: {self.vt_scanner.error_count}",
@@ -864,6 +1177,8 @@ class ProcessMonitorApp:
             return "[dim]queued[/dim]"
         if vt.status == "disabled":
             return "[dim]disabled[/dim]"
+        if vt.status == "remote":
+            return "[dim]remote[/dim]"
         if vt.status == "error":
             return "[red]error[/red]"
         return "[dim]unknown[/dim]"
@@ -894,7 +1209,7 @@ def scan_file_once(path: Path, policy_path: Path | None, workdir: Path, output_j
     log = JsonlLog(workdir / "logs" / "manual_scan.jsonl")
     vt_cfg = policy.get("virustotal", {})
     client = VirusTotalClient(
-        api_key=os.getenv("VIRUSTOTAL_API_KEY"),
+        api_key=get_virustotal_api_key(),
         cache_path=workdir / "cache" / "vt_cache.json",
         rate_limit_seconds=float(vt_cfg.get("rate_limit_seconds", 16)),
         cache_ttl_hours=float(vt_cfg.get("cache_ttl_hours", 24 * 7)),
@@ -951,8 +1266,49 @@ def expand_env_vars(s: str) -> str:
     return os.path.expandvars(s)
 
 
+def get_env_var(name: str) -> str | None:
+    value = os.getenv(name)
+    if value:
+        return value
+
+    if os.name != "nt":
+        return None
+
+    try:
+        import winreg
+    except Exception:
+        return None
+
+    locations = [
+        (winreg.HKEY_CURRENT_USER, "Environment"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+    ]
+    for hive, path in locations:
+        try:
+            with winreg.OpenKey(hive, path) as key:
+                value, _ = winreg.QueryValueEx(key, name)
+        except OSError:
+            continue
+        if value:
+            return os.path.expandvars(str(value))
+    return None
+
+
+def get_virustotal_api_key() -> str | None:
+    return get_env_var("VIRUSTOTAL_API_KEY")
+
+
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+
+
+def format_epoch_for_display(epoch: float) -> str:
+    if epoch <= 0:
+        return ""
+    try:
+        return dt.datetime.fromtimestamp(epoch).strftime("%m-%d %H:%M:%S")
+    except (OSError, OverflowError, ValueError):
+        return ""
 
 
 def timestamp_for_filename() -> str:
@@ -961,6 +1317,12 @@ def timestamp_for_filename() -> str:
 
 def sanitize_filename(name: str) -> str:
     return "".join(c if c.isalnum() or c in "._-" else "_" for c in name)[:120]
+
+
+def validate_remote_host(host: str) -> None:
+    allowed_chars = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_:")
+    if not host or any(c not in allowed_chars for c in host):
+        raise ValueError("Remote host may only contain letters, numbers, dots, dashes, underscores, and colons.")
 
 
 def is_admin() -> bool:
@@ -981,6 +1343,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         p.add_argument("--max-rows", type=int, default=30, help="Max process rows to display")
         p.add_argument("--policy", type=Path, default=Path("policy.json"), help="Path to policy JSON")
         p.add_argument("--workdir", type=Path, default=DEFAULT_WORKDIR, help="Data folder for logs/cache/dumps/quarantine")
+        p.add_argument("-remote", "--remote", help="Read-only remote Windows host/IP to monitor over PowerShell CIM")
+        p.add_argument("--remote-timeout", type=float, default=15.0, help="Remote CIM query timeout in seconds")
         p.add_argument("-dry", "--dry", "--dry-run", dest="dry_run", action="store_true", help="Run in dry-run mode (default)")
         p.add_argument(
             "-exec",
@@ -1044,6 +1408,13 @@ def main() -> int:
     if action == "monitor":
         if args.dry_run and args.execute:
             parser.error("Choose dry-run or execute mode, not both.")
+        if args.remote and args.execute:
+            parser.error("Remote mode is read-only. Use -remote without -exec.")
+        if args.remote:
+            try:
+                validate_remote_host(args.remote)
+            except ValueError as e:
+                parser.error(str(e))
         if args.execute and not is_admin():
             Console().print(
                 "[bold red]Warning:[/bold red] --execute was requested but this terminal is probably not elevated. "

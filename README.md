@@ -51,30 +51,38 @@ Keep your VirusTotal key private. Do not commit it or hard-code it into scripts.
 Safe dry-run mode:
 
 ```powershell
-.\.venv\Scripts\python.exe process_defender.py monitor
+.\launch.ps1
 ```
 
 Dry-run mode logs matching policy actions without killing, suspending, dumping, or quarantining processes.
 
+Explicit dry-run mode:
+
+```powershell
+.\launch.ps1 -DryRun
+```
+
+Run in the current terminal instead of opening Windows Terminal panes:
+
+```powershell
+.\launch.ps1 -DryRun -CurrentTerminal
+```
+
 Execute mode:
 
 ```powershell
-.\.venv\Scripts\python.exe process_defender.py monitor --execute
+.\launch.ps1 -Execute
 ```
 
 Use execute mode only in a lab VM. Run from an elevated terminal if process-control actions need to work reliably.
 
-Optional Windows Terminal launcher:
-
-```powershell
-.\launch.ps1
-```
-
 ## Scan a File
 
 ```powershell
-.\.venv\Scripts\python.exe process_defender.py scan-file .\path\to\file.exe
+.\launch.ps1 -ScanFile .\path\to\file.exe
 ```
+
+The launcher also accepts `-Policy`, `-Workdir`, `-Interval`, and `-MaxRows`.
 
 ## Logs
 

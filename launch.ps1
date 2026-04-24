@@ -1,10 +1,91 @@
-# Optional Windows Terminal pane launcher.
-# Run from the project folder after installing requirements.
+# Launch Process Defender TUI from the project folder.
 
-$root = Split-Path -Parent $MyInvocation.MyCommand.Path
-Set-Location $root
+[CmdletBinding()]
+param(
+    [switch]$DryRun,
+    [switch]$Execute,
+    [string]$ScanFile,
+    [string]$Policy = "policy.json",
+    [string]$Workdir = "defender_data",
+    [double]$Interval = 2.0,
+    [int]$MaxRows = 30,
+    [switch]$CurrentTerminal
+)
 
-wt `
-  new-tab --title "Monitor" --startingDirectory "$root" powershell -NoExit -ExecutionPolicy Bypass -Command "& '.\.venv\Scripts\python.exe' 'process_defender.py' monitor" `
-  `; split-pane -H --title "Alerts" --startingDirectory "$root" powershell -NoExit -ExecutionPolicy Bypass -Command "& '.\.venv\Scripts\python.exe' 'process_defender.py' tail --log alerts" `
-  `; split-pane -V --title "Actions" --startingDirectory "$root" powershell -NoExit -ExecutionPolicy Bypass -Command "& '.\.venv\Scripts\python.exe' 'process_defender.py' tail --log actions"
+$ErrorActionPreference = "Stop"
+
+$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Location $Root
+
+$SelectedModes = @($DryRun.IsPresent, $Execute.IsPresent, -not [string]::IsNullOrWhiteSpace($ScanFile)) | Where-Object { $_ }
+if ($SelectedModes.Count -gt 1) {
+    throw "Choose only one mode: -DryRun, -Execute, or -ScanFile <path>."
+}
+
+$PythonPath = Join-Path $Root ".venv\Scripts\python.exe"
+if (-not (Test-Path $PythonPath)) {
+    throw "Virtual environment not found. Run .\install.ps1 first."
+}
+
+$ResolvedPolicy = (Resolve-Path -LiteralPath $Policy).Path
+if ([System.IO.Path]::IsPathRooted($Workdir)) {
+    $ResolvedWorkdir = $Workdir
+} else {
+    $ResolvedWorkdir = Join-Path $Root $Workdir
+}
+
+if (-not $env:VIRUSTOTAL_API_KEY) {
+    $PersistedKey = [Environment]::GetEnvironmentVariable("VIRUSTOTAL_API_KEY", "User")
+    if (-not $PersistedKey) {
+        $PersistedKey = [Environment]::GetEnvironmentVariable("VIRUSTOTAL_API_KEY", "Machine")
+    }
+    if ($PersistedKey) {
+        $env:VIRUSTOTAL_API_KEY = $PersistedKey
+    }
+}
+
+if ($ScanFile) {
+    $ResolvedScanFile = (Resolve-Path -LiteralPath $ScanFile).Path
+    & $PythonPath "process_defender.py" "scan-file" $ResolvedScanFile "--policy" $ResolvedPolicy "--workdir" $ResolvedWorkdir
+    exit $LASTEXITCODE
+}
+
+$MonitorArgs = @(
+    "process_defender.py",
+    "monitor",
+    "--interval", $Interval.ToString([System.Globalization.CultureInfo]::InvariantCulture),
+    "--max-rows", $MaxRows.ToString([System.Globalization.CultureInfo]::InvariantCulture),
+    "--policy", $ResolvedPolicy,
+    "--workdir", $ResolvedWorkdir
+)
+$Title = "Monitor (Dry Run)"
+if ($Execute) {
+    $MonitorArgs += "--execute"
+    $Title = "Monitor (Execute)"
+}
+
+function ConvertTo-PowerShellSingleQuotedArgument {
+    param([string]$Value)
+    return "'" + ($Value -replace "'", "''") + "'"
+}
+
+$RelativePython = ".\.venv\Scripts\python.exe"
+$MonitorCommand = "& " + (ConvertTo-PowerShellSingleQuotedArgument $RelativePython) + " " + (($MonitorArgs | ForEach-Object { ConvertTo-PowerShellSingleQuotedArgument $_ }) -join " ")
+$AlertsCommand = "& " + (ConvertTo-PowerShellSingleQuotedArgument $RelativePython) + " 'process_defender.py' 'tail' '--log' 'alerts' '--workdir' " + (ConvertTo-PowerShellSingleQuotedArgument $ResolvedWorkdir)
+$ActionsCommand = "& " + (ConvertTo-PowerShellSingleQuotedArgument $RelativePython) + " 'process_defender.py' 'tail' '--log' 'actions' '--workdir' " + (ConvertTo-PowerShellSingleQuotedArgument $ResolvedWorkdir)
+
+if ((-not $CurrentTerminal) -and (Get-Command wt -ErrorAction SilentlyContinue)) {
+    $WtArgs = @(
+        "new-tab", "--title", $Title, "--startingDirectory", $Root,
+        "powershell", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $MonitorCommand,
+        ";", "split-pane", "-H", "--title", "Alerts", "--startingDirectory", $Root,
+        "powershell", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $AlertsCommand,
+        ";", "split-pane", "-V", "--title", "Actions", "--startingDirectory", $Root,
+        "powershell", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $ActionsCommand
+    )
+    & wt @WtArgs
+    exit $LASTEXITCODE
+}
+
+& $PythonPath @MonitorArgs
+exit $LASTEXITCODE

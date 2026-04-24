@@ -39,5 +39,5 @@ Write-Host "Installing dependencies..."
 Write-Host ""
 Write-Host "Install complete."
 Write-Host "Activate with: .\.venv\Scripts\Activate.ps1"
-Write-Host "Run safely with: .\.venv\Scripts\python.exe process_defender.py monitor"
+Write-Host "Run safely with: .\launch.ps1"
 Write-Host 'Set VirusTotal for this shell with: $env:VIRUSTOTAL_API_KEY = "paste_key_here"'

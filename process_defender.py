@@ -877,7 +877,7 @@ def load_policy(path: Path | None) -> dict[str, Any]:
         return DEFAULT_POLICY
     if not path.exists():
         return DEFAULT_POLICY
-    loaded = json.loads(path.read_text(encoding="utf-8"))
+    loaded = json.loads(path.read_text(encoding="utf-8-sig"))
     # shallow merge: user file overrides top-level keys
     merged = dict(DEFAULT_POLICY)
     merged.update(loaded)

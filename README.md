@@ -1,19 +1,24 @@
 # Process Defender TUI
 
-A first-draft Python school project for a Windows process-monitoring antivirus.
+A Windows-focused process monitor with a terminal UI, policy-based alerts, and optional VirusTotal reputation checks.
 
-## What it does
+## Features
 
-- Monitors live processes with `psutil`
-- Shows process name, PID, CPU %, memory MB, executable path
-- Calculates SHA-256 for executable files
-- Looks up executable reputation via VirusTotal API v3
+- Shows live process name, PID, CPU %, memory usage, executable path, policy status, and VirusTotal status
+- Calculates SHA-256 hashes for executable files
+- Looks up executable reputation with the VirusTotal API v3
 - Applies editable rules from `policy.json`
-- Logs alerts and responder actions as JSONL
-- Supports dry-run mode by default
+- Writes alerts and actions as JSONL logs
+- Runs in safe dry-run mode by default
 - Can optionally kill, suspend, dump memory, and quarantine when started with `--execute`
 
 ## Install
+
+```powershell
+.\install.ps1
+```
+
+Manual install:
 
 ```powershell
 py -m venv .venv
@@ -21,43 +26,55 @@ py -m venv .venv
 py -m pip install -r requirements.txt
 ```
 
-Set your VirusTotal key:
+## VirusTotal API Key
+
+Set the key in the same terminal before starting the monitor:
 
 ```powershell
 $env:VIRUSTOTAL_API_KEY = "paste_key_here"
 ```
 
-For a persistent user-level variable:
+The app reads `VIRUSTOTAL_API_KEY` from the process environment.
+
+To set it persistently for future terminal sessions:
 
 ```powershell
 setx VIRUSTOTAL_API_KEY "paste_key_here"
 ```
 
-## Run safely first
+After using `setx`, open a new terminal before starting the monitor.
+
+Keep your VirusTotal key private. Do not commit it or hard-code it into scripts. The default policy does not upload unknown files, and the default `rate_limit_seconds` value is `16`, which keeps lookups under the free public API limit of 4 requests per minute. Free public API access is for personal, non-commercial use.
+
+## Run
+
+Safe dry-run mode:
 
 ```powershell
-py process_defender.py monitor
+.\.venv\Scripts\python.exe process_defender.py monitor
 ```
 
-This is **dry-run** mode. It logs what it would do, but does not kill, suspend, dump, or quarantine.
+Dry-run mode logs matching policy actions without killing, suspending, dumping, or quarantining processes.
 
-## Execute mode inside a lab VM only
+Execute mode:
 
 ```powershell
-py process_defender.py monitor --execute
+.\.venv\Scripts\python.exe process_defender.py monitor --execute
 ```
 
-Use an elevated terminal if you want process-control actions to work reliably.
+Use execute mode only in a lab VM. Run from an elevated terminal if process-control actions need to work reliably.
 
-## Test the VirusTotal scanner with EICAR
-
-Download the EICAR test file from the official EICAR site, then run:
+Optional Windows Terminal launcher:
 
 ```powershell
-py process_defender.py scan-file .\eicar.com.txt
+.\launch.ps1
 ```
 
-This tests the scanner path. EICAR is useful for AV detection tests, but it is not a normal modern Windows process executable you can rely on for the live-process part.
+## Scan a File
+
+```powershell
+.\.venv\Scripts\python.exe process_defender.py scan-file .\path\to\file.exe
+```
 
 ## Logs
 
@@ -67,25 +84,26 @@ Default data folder:
 .\defender_data\
 ```
 
-Important logs:
+Log files:
 
 ```text
 defender_data\logs\alerts.jsonl
 defender_data\logs\actions.jsonl
 defender_data\logs\virustotal.jsonl
+defender_data\logs\manual_scan.jsonl
 ```
 
 Tail logs:
 
 ```powershell
-py process_defender.py tail --log alerts
-py process_defender.py tail --log actions
-py process_defender.py tail --log virustotal
+.\.venv\Scripts\python.exe process_defender.py tail --log alerts
+.\.venv\Scripts\python.exe process_defender.py tail --log actions
+.\.venv\Scripts\python.exe process_defender.py tail --log virustotal
 ```
 
-## Policy changes
+## Policy
 
-Edit `policy.json`.
+Edit `policy.json` to change thresholds, rules, and actions.
 
 Example rule:
 
@@ -98,13 +116,13 @@ Example rule:
 }
 ```
 
-Supported conditions in this draft:
+Supported conditions:
 
 - `process_name_equals`
 - `memory_mb_gt`
 - `vt_detections_gt`
 
-Supported actions in this draft:
+Supported actions:
 
 - `log_warning`
 - `kill`
@@ -114,7 +132,7 @@ Supported actions in this draft:
 
 ## ProcDump
 
-Download Sysinternals ProcDump from Microsoft and either place `procdump.exe` next to this script / in PATH, or set the path in `policy.json`:
+Memory dumping requires Sysinternals ProcDump. Put `procdump.exe` next to this script, in `PATH`, or set the path in `policy.json`:
 
 ```json
 "dump": {
@@ -122,9 +140,3 @@ Download Sysinternals ProcDump from Microsoft and either place `procdump.exe` ne
   "dump_folder": "dumps"
 }
 ```
-
-## Notes on pymux
-
-The code is intentionally not hard-wired to pymux. The live UI already has process, VirusTotal, alert, and action panes inside a single terminal using Rich.
-
-Reason: pymux is interesting but old, and its own project notes describe better scripting support as future work. You can still run the monitor inside pymux manually and use extra panes to tail logs.

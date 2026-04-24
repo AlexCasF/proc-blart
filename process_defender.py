@@ -872,35 +872,6 @@ def write_default_policy(path: Path) -> None:
     print(f"Wrote default policy to {path}")
 
 
-def write_pymux_note(path: Path) -> None:
-    # Pymux's own README says better scripting support is still a future idea.
-    # This note is intentionally conservative. The app itself provides panes using Rich.
-    content = """# pymux integration note
-
-# This project is designed so that the core monitor is not dependent on pymux.
-# The reliable school-demo mode is:
-#
-#     py process_defender.py monitor
-#
-# That command draws a multi-pane TUI with Rich inside a single terminal.
-#
-# You can still use pymux manually as a wrapper:
-#
-#     pymux
-#     py process_defender.py monitor
-#
-# Then open another pane and tail logs:
-#
-#     py process_defender.py tail --log alerts
-#     py process_defender.py tail --log actions
-#
-# I do not recommend making pymux a hard dependency on Windows because the
-# published package is old and its own README describes scripting support as incomplete.
-"""
-    path.write_text(content, encoding="utf-8")
-    print(f"Wrote pymux note to {path}")
-
-
 def load_policy(path: Path | None) -> dict[str, Any]:
     if not path:
         return DEFAULT_POLICY
@@ -967,7 +938,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     tail.add_argument("--log", choices=["alerts", "actions", "virustotal", "manual_scan"], default="alerts")
 
     sub.add_parser("write-default-policy", help="Write default policy.json")
-    sub.add_parser("write-pymux-note", help="Write conservative pymux integration note")
 
     return parser
 
@@ -977,10 +947,6 @@ def main() -> int:
 
     if args.command == "write-default-policy":
         write_default_policy(Path("policy.json"))
-        return 0
-
-    if args.command == "write-pymux-note":
-        write_pymux_note(Path("pymux-notes.conf"))
         return 0
 
     if args.command == "tail":

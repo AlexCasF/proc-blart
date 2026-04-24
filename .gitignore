@@ -1,0 +1,7 @@
+# Python/runtime artifacts
+__pycache__/
+*.py[cod]
+.venv/
+
+# Process Defender runtime data
+defender_data/

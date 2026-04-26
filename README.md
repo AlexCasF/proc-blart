@@ -18,13 +18,13 @@ A Windows-focused process monitor with a terminal UI, policy-based alerts, and o
 Windows:
 
 ```powershell
-irm https://raw.githubusercontent.com/AlexCasF/proc-blart/main/scripts/bootstrap.ps1 | iex
+irm https://raw.githubusercontent.com/AlexCasF/procblart/main/scripts/bootstrap.ps1 | iex
 ```
 
 macOS, Linux, or WSL:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/AlexCasF/proc-blart/main/scripts/bootstrap.sh | bash
+curl -fsSL https://raw.githubusercontent.com/AlexCasF/procblart/main/scripts/bootstrap.sh | bash
 ```
 
 ## VirusTotal API Key
@@ -52,7 +52,7 @@ Keep your VirusTotal key private. Do not commit it or hard-code it into scripts.
 Activate the virtual environment first:
 
 ```powershell
-cd $HOME\proc-blart
+cd $HOME\procblart
 .\.venv\Scripts\Activate.ps1
 ```
 
@@ -65,14 +65,14 @@ procblart run -dry
 Without activation on Windows:
 
 ```powershell
-cd $HOME\proc-blart
+cd $HOME\procblart
 .\procblart.cmd run -dry
 ```
 
 Or from anywhere:
 
 ```powershell
-& "$HOME\proc-blart\.venv\Scripts\procblart.exe" run -dry
+& "$HOME\procblart\.venv\Scripts\procblart.exe" run -dry
 ```
 
 Dry-run mode logs matching policy actions without killing, suspending, dumping, or quarantining processes.
@@ -149,16 +149,16 @@ PowerShell launcher equivalent:
 Default data folder:
 
 ```text
-.\proc_blart_data\
+.\procblart_data\
 ```
 
 Log files:
 
 ```text
-proc_blart_data\logs\alerts.jsonl
-proc_blart_data\logs\actions.jsonl
-proc_blart_data\logs\virustotal.jsonl
-proc_blart_data\logs\manual_scan.jsonl
+procblart_data\logs\alerts.jsonl
+procblart_data\logs\actions.jsonl
+procblart_data\logs\virustotal.jsonl
+procblart_data\logs\manual_scan.jsonl
 ```
 
 Tail logs:

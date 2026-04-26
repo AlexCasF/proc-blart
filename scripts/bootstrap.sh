@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALL_DIR="${INSTALL_DIR:-$HOME/proc-blart}"
+INSTALL_DIR="${INSTALL_DIR:-$HOME/procblart}"
 BRANCH="${BRANCH:-main}"
 REPO_OWNER="AlexCasF"
-REPO_NAME="proc-blart"
+REPO_NAME="procblart"
 ZIP_URL="https://github.com/$REPO_OWNER/$REPO_NAME/archive/refs/heads/$BRANCH.zip"
 TMP_DIR="$(mktemp -d)"
 

@@ -31,7 +31,7 @@ from rich.table import Table
 from rich.text import Text
 
 APP_NAME = "Proc Blart TUI"
-DEFAULT_WORKDIR = Path.cwd() / "proc_blart_data"
+DEFAULT_WORKDIR = Path.cwd() / "procblart_data"
 VT_FILE_REPORT_URL = "https://www.virustotal.com/api/v3/files/{sha256}"
 VT_UPLOAD_URL = "https://www.virustotal.com/api/v3/files"
 MB = 1024 * 1024

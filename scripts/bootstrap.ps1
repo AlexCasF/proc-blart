@@ -2,7 +2,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$InstallDir = (Join-Path $HOME "proc-blart"),
+    [string]$InstallDir = (Join-Path $HOME "procblart"),
     [string]$Branch = "main",
     [switch]$Force
 )
@@ -10,9 +10,9 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoOwner = "AlexCasF"
-$RepoName = "proc-blart"
+$RepoName = "procblart"
 $ZipUrl = "https://github.com/$RepoOwner/$RepoName/archive/refs/heads/$Branch.zip"
-$TempRoot = Join-Path ([System.IO.Path]::GetTempPath()) "proc-blart-bootstrap-$([guid]::NewGuid())"
+$TempRoot = Join-Path ([System.IO.Path]::GetTempPath()) "procblart-bootstrap-$([guid]::NewGuid())"
 $ZipPath = Join-Path $TempRoot "source.zip"
 $ExtractPath = Join-Path $TempRoot "source"
 

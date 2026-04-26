@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
-procblart = "proc_blart:main"
+procblart = "procblart:main"
 
 [tool.setuptools]
-py-modules = ["proc_blart"]
+py-modules = ["procblart"]

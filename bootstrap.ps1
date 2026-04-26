@@ -53,9 +53,23 @@ if (-not (Test-Path $Installer)) {
 Write-Host "Running installer..."
 & powershell -NoProfile -ExecutionPolicy Bypass -File $Installer
 
+$ShimPath = Join-Path $InstallDir "procblart.cmd"
+$ShimContent = @"
+@echo off
+"%~dp0.venv\Scripts\procblart.exe" %*
+"@
+Set-Content -LiteralPath $ShimPath -Value $ShimContent -Encoding ASCII
+
 Write-Host ""
 Write-Host "Proc Blart is installed in: $InstallDir"
 Write-Host "Start a new shell or run:"
 Write-Host "  cd '$InstallDir'"
 Write-Host "  .\.venv\Scripts\Activate.ps1"
 Write-Host "  procblart run -dry"
+Write-Host ""
+Write-Host "Or run without activation:"
+Write-Host "  cd '$InstallDir'"
+Write-Host "  .\procblart.cmd run -dry"
+Write-Host ""
+Write-Host "Or from anywhere:"
+Write-Host "  & '$InstallDir\.venv\Scripts\procblart.exe' run -dry"

@@ -40,5 +40,6 @@ Write-Host "Installing dependencies..."
 Write-Host ""
 Write-Host "Install complete."
 Write-Host "Activate with: .\.venv\Scripts\Activate.ps1"
-Write-Host "Run safely with: procblart run -dry"
+Write-Host "Run safely after activation with: procblart run -dry"
+Write-Host "Run without activation with: .\.venv\Scripts\procblart.exe run -dry"
 Write-Host 'Set VirusTotal for this shell with: $env:VIRUSTOTAL_API_KEY = "paste_key_here"'

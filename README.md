@@ -87,6 +87,7 @@ Keep your VirusTotal key private. Do not commit it or hard-code it into scripts.
 Activate the virtual environment first:
 
 ```powershell
+cd $HOME\proc-blart
 .\.venv\Scripts\Activate.ps1
 ```
 
@@ -94,6 +95,19 @@ Safe dry-run mode:
 
 ```powershell
 procblart run -dry
+```
+
+Without activation on Windows:
+
+```powershell
+cd $HOME\proc-blart
+.\procblart.cmd run -dry
+```
+
+Or from anywhere:
+
+```powershell
+& "$HOME\proc-blart\.venv\Scripts\procblart.exe" run -dry
 ```
 
 Dry-run mode logs matching policy actions without killing, suspending, dumping, or quarantining processes.

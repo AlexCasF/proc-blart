@@ -100,7 +100,7 @@ Read-only remote monitor for one Windows LAN host:
 procblart run -remote 192.168.1.25
 ```
 
-Remote mode uses PowerShell CIM/WMI from the local machine, does not perform VirusTotal lookups, and does not kill, suspend, dump, or quarantine remote processes. By default it tries WinRM/WSMan first and then DCOM/WMI as a fallback. You can force one transport while troubleshooting:
+Remote mode uses PowerShell CIM/WMI from the local machine, does not kill, suspend, dump, or quarantine remote processes. By default it tries WinRM/WSMan first and then DCOM/WMI as a fallback. Remote VirusTotal support is hash-lookup only: Proc Blart computes SHA-256 on the target and queries VirusTotal from the local machine. That requires WinRM/WSMan access even if process inventory falls back to DCOM/WMI. You can force one transport while troubleshooting:
 
 ```powershell
 procblart run -remote 192.168.1.25 --remote-transport wsman

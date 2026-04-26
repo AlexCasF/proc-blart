@@ -161,6 +161,13 @@ class ProcessRow:
     policy_hits: list[str] = field(default_factory=list)
 
 
+@dataclass
+class VTTodo:
+    kind: str
+    value: str
+    source: str = ""
+
+
 def powershell_single_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -244,6 +251,24 @@ class RemoteProcessCollector:
 
         self.last_error = remote_connection_help(self.host, self.transport, failures)
         raise RuntimeError(self.last_error)
+
+    def hash_paths(self, paths: list[str]) -> dict[str, str]:
+        if os.name != "nt":
+            raise RuntimeError("Remote CIM collection is only supported from Windows.")
+        powershell = shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            raise RuntimeError("PowerShell was not found.")
+        validate_remote_host(self.host)
+        unique_paths = [path for path in dict.fromkeys(paths) if path]
+        if not unique_paths:
+            return {}
+
+        transport = self.last_transport or ("local" if is_local_remote_host(self.host) else self.transport)
+        if transport == "auto":
+            transport = "wsman"
+        if transport == "dcom" and not is_local_remote_host(self.host):
+            raise RuntimeError("Remote VirusTotal hashing requires WinRM/WSMan access to run Get-FileHash on the target.")
+        return self._hash_paths_with_transport(powershell, unique_paths, transport)
 
     def _collect_with_transport(self, powershell: str, transport: str) -> list[ProcessRow]:
         host_literal = powershell_single_quote(self.host)
@@ -349,6 +374,97 @@ try {
         self.last_error = ""
         return rows
 
+    def _hash_paths_with_transport(self, powershell: str, paths: list[str], transport: str) -> dict[str, str]:
+        host_literal = powershell_single_quote(self.host)
+        transport_literal = powershell_single_quote(transport)
+        paths_json = json.dumps(paths)
+        paths_literal = powershell_single_quote(paths_json)
+
+        script = f"$ComputerName = {host_literal}\n$Transport = {transport_literal}\n$PathsJson = {paths_literal}\n" + r"""
+$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+
+$Paths = ConvertFrom-Json -InputObject $PathsJson
+$IsLocal = $ComputerName -in @(".", "localhost", "127.0.0.1", "::1", $env:COMPUTERNAME)
+$Session = $null
+try {
+    if (-not $IsLocal) {
+        $Session = New-PSSession -ComputerName $ComputerName
+    }
+
+    if ($null -ne $Session) {
+        $Rows = Invoke-Command -Session $Session -ArgumentList (, $Paths) -ScriptBlock {
+            param([string[]]$TargetPaths)
+            foreach ($Path in $TargetPaths) {
+                if ([string]::IsNullOrWhiteSpace($Path)) {
+                    continue
+                }
+                if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+                    continue
+                }
+                try {
+                    $Hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash
+                    [pscustomobject]@{
+                        path = [string]$Path
+                        sha256 = [string]$Hash
+                    }
+                } catch {
+                }
+            }
+        }
+    } else {
+        $Rows = foreach ($Path in $Paths) {
+            if ([string]::IsNullOrWhiteSpace($Path)) {
+                continue
+            }
+            if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+                continue
+            }
+            try {
+                $Hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash
+                [pscustomobject]@{
+                    path = [string]$Path
+                    sha256 = [string]$Hash
+                }
+            } catch {
+            }
+        }
+    }
+
+    ConvertTo-Json -InputObject @($Rows) -Compress -Depth 3
+} finally {
+    if ($null -ne $Session) {
+        Remove-PSSession -Session $Session
+    }
+}
+"""
+        result = subprocess.run(
+            [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=max(self.timeout, 30.0),
+            check=False,
+        )
+        if result.returncode != 0:
+            message = result.stderr.strip() or result.stdout.strip() or f"PowerShell exited with {result.returncode}"
+            raise RuntimeError(message)
+        if not result.stdout.strip():
+            return {}
+
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"PowerShell returned invalid hash JSON: {e}: {result.stdout[:500]}") from e
+        if isinstance(data, dict):
+            data = [data]
+        hashes: dict[str, str] = {}
+        for item in data:
+            path = str(item.get("path") or "")
+            sha256 = str(item.get("sha256") or "")
+            if path and sha256:
+                hashes[path] = sha256
+        return hashes
+
 
 class JsonlLog:
     def __init__(self, path: Path, max_recent: int = 200) -> None:
@@ -423,6 +539,20 @@ class VirusTotalClient:
         if result.status == "unknown" and self.upload_unknown_files:
             result = self._upload_file_for_analysis(p, sha256)
 
+        self._cache_set(sha256, result)
+        return result
+
+    def lookup_sha256(self, sha256: str) -> VTResult:
+        if not self.api_key:
+            return VTResult(status="disabled", sha256=sha256, message="No VIRUSTOTAL_API_KEY set")
+        if not sha256:
+            return VTResult(status="unknown", message="Missing SHA-256")
+
+        cached = self._cache_get(sha256)
+        if cached:
+            return cached
+
+        result = self._get_file_report(sha256)
         self._cache_set(sha256, result)
         return result
 
@@ -520,8 +650,9 @@ class VTScanner(threading.Thread):
         super().__init__(daemon=True)
         self.client = client
         self.log = log
-        self.q: queue.Queue[str] = queue.Queue()
+        self.q: queue.Queue[VTTodo] = queue.Queue()
         self.results_by_path: dict[str, VTResult] = {}
+        self.results_by_sha256: dict[str, VTResult] = {}
         self.queued: set[str] = set()
         self.running = True
         self.scanned_count = 0
@@ -533,10 +664,11 @@ class VTScanner(threading.Thread):
             return
         normalized = str(Path(path))
         with self._lock:
-            if normalized in self.queued or normalized in self.results_by_path:
+            queue_key = f"path:{normalized}"
+            if queue_key in self.queued or normalized in self.results_by_path:
                 return
-            self.queued.add(normalized)
-        self.q.put(normalized)
+            self.queued.add(queue_key)
+        self.q.put(VTTodo(kind="path", value=normalized))
 
     def get_result(self, path: str) -> VTResult:
         if not path:
@@ -545,30 +677,56 @@ class VTScanner(threading.Thread):
         with self._lock:
             return self.results_by_path.get(normalized, VTResult(status="queued"))
 
+    def submit_sha256(self, sha256: str, source: str = "") -> None:
+        normalized = str(sha256 or "").strip().lower()
+        if not normalized:
+            return
+        with self._lock:
+            queue_key = f"sha256:{normalized}"
+            if queue_key in self.queued or normalized in self.results_by_sha256:
+                return
+            self.queued.add(queue_key)
+        self.q.put(VTTodo(kind="sha256", value=normalized, source=source))
+
+    def get_result_by_sha256(self, sha256: str) -> VTResult:
+        normalized = str(sha256 or "").strip().lower()
+        if not normalized:
+            return VTResult(status="unknown", message="Missing SHA-256")
+        with self._lock:
+            return self.results_by_sha256.get(normalized, VTResult(status="queued", sha256=normalized))
+
     def run(self) -> None:
         while self.running:
             try:
-                path = self.q.get(timeout=0.5)
+                item = self.q.get(timeout=0.5)
             except queue.Empty:
                 continue
-            result = self.client.lookup_path(path)
-            with self._lock:
-                self.results_by_path[path] = result
+            if item.kind == "sha256":
+                result = self.client.lookup_sha256(item.value)
+                with self._lock:
+                    self.results_by_sha256[item.value] = result
+            else:
+                result = self.client.lookup_path(item.value)
+                with self._lock:
+                    self.results_by_path[item.value] = result
             self.scanned_count += 1
             if result.status == "error":
                 self.error_count += 1
-            self.log.write(
-                {
-                    "type": "vt_result",
-                    "path": path,
-                    "status": result.status,
-                    "sha256": result.sha256,
-                    "detections": result.detections,
-                    "malicious": result.malicious,
-                    "suspicious": result.suspicious,
-                    "message": result.message,
-                }
-            )
+            event = {
+                "type": "vt_result",
+                "status": result.status,
+                "sha256": result.sha256,
+                "detections": result.detections,
+                "malicious": result.malicious,
+                "suspicious": result.suspicious,
+                "message": result.message,
+            }
+            if item.kind == "sha256":
+                event["lookup"] = "sha256"
+                event["source"] = item.source
+            else:
+                event["path"] = item.value
+            self.log.write(event)
 
     @property
     def queue_size(self) -> int:
@@ -912,6 +1070,9 @@ class ProcessMonitorApp:
         self.remote_acted: set[str] = set()
         self.remote_error = ""
         self.last_logged_remote_error = ""
+        self.remote_hash_by_path: dict[str, str] = {}
+        self.remote_hash_errors: dict[str, str] = {}
+        self.remote_hash_capability_error = ""
 
     def handle_key(self, key: str) -> None:
         if key == "space":
@@ -964,7 +1125,7 @@ class ProcessMonitorApp:
     def run(self) -> None:
         startup_mode = "remote_readonly" if self.remote_collector else "execute" if self.args.execute else "dry_run"
         self.alert_log.write({"type": "startup", "mode": startup_mode, "remote": self.remote_host})
-        if not self.remote_collector:
+        if not self.remote_collector or get_virustotal_api_key():
             self.vt_scanner.start()
         self.keyboard.start()
 
@@ -1064,6 +1225,8 @@ class ProcessMonitorApp:
                 self.last_logged_remote_error = self.remote_error
             return self.rows
 
+        self._update_remote_vt(rows)
+
         for row in rows:
             rules = self.policy_engine.evaluate(row)
             if not rules:
@@ -1072,6 +1235,67 @@ class ProcessMonitorApp:
             self._record_remote_policy_hit(row, rules)
 
         return self._sort_rows(rows)
+
+    def _update_remote_vt(self, rows: list[ProcessRow]) -> None:
+        if not get_virustotal_api_key():
+            for row in rows:
+                row.vt = VTResult(status="disabled", message="No VIRUSTOTAL_API_KEY set")
+            return
+
+        candidates: list[str] = []
+        for row in rows:
+            if not row.exe:
+                row.vt = VTResult(status="unknown", message="No executable path")
+                continue
+            sha256 = self.remote_hash_by_path.get(row.exe, "")
+            if sha256:
+                row.vt = self.vt_scanner.get_result_by_sha256(sha256)
+                continue
+            if row.exe in self.remote_hash_errors:
+                row.vt = VTResult(status="unknown", message=self.remote_hash_errors[row.exe])
+                continue
+            candidates.append(row.exe)
+
+        if not candidates or self.remote_hash_capability_error:
+            if self.remote_hash_capability_error:
+                for row in rows:
+                    if row.vt.status == "remote":
+                        row.vt = VTResult(status="unknown", message=self.remote_hash_capability_error)
+            return
+
+        paths_to_hash = list(dict.fromkeys(candidates))[: self.max_new_paths_per_cycle]
+        try:
+            hashes = self.remote_collector.hash_paths(paths_to_hash)
+            self.remote_hash_capability_error = ""
+        except Exception as e:
+            self.remote_hash_capability_error = compact_error_line(str(e), 500)
+            for row in rows:
+                if row.vt.status == "remote":
+                    row.vt = VTResult(status="unknown", message=self.remote_hash_capability_error)
+            return
+
+        found_paths = set(hashes)
+        for path, sha256 in hashes.items():
+            normalized_sha = sha256.strip().lower()
+            if not normalized_sha:
+                continue
+            self.remote_hash_by_path[path] = normalized_sha
+            self.vt_scanner.submit_sha256(normalized_sha, source=path)
+
+        for path in paths_to_hash:
+            if path not in found_paths:
+                self.remote_hash_errors[path] = "Remote executable path not accessible for hashing"
+
+        for row in rows:
+            if not row.exe:
+                continue
+            sha256 = self.remote_hash_by_path.get(row.exe, "")
+            if sha256:
+                row.vt = self.vt_scanner.get_result_by_sha256(sha256)
+            elif row.exe in self.remote_hash_errors:
+                row.vt = VTResult(status="unknown", message=self.remote_hash_errors[row.exe])
+            else:
+                row.vt = VTResult(status="queued", message="Queued for remote hash lookup")
 
     def _sort_rows(self, rows: list[ProcessRow]) -> list[ProcessRow]:
         mode = SORT_MODES[self.sort_mode_index][0]
@@ -1155,7 +1379,7 @@ class ProcessMonitorApp:
     def _header(self) -> Panel:
         if self.remote_collector:
             mode = "[bold cyan]REMOTE READ-ONLY[/bold cyan]"
-            api = "[dim]disabled[/dim]"
+            api = "[green]hash lookup[/green]" if get_virustotal_api_key() else "[red]missing key[/red]"
             source = f"remote: [bold]{self.remote_host}[/bold]"
         else:
             mode = "[bold red]EXECUTE[/bold red]" if self.args.execute else "[bold yellow]DRY RUN[/bold yellow]"
@@ -1234,8 +1458,16 @@ class ProcessMonitorApp:
                 f"Host: {self.remote_host}",
                 "Mode: read-only",
                 f"Collector: PowerShell CIM/WMI ({active_transport})",
-                "VirusTotal: disabled",
+                f"VirusTotal queue: {self.vt_scanner.queue_size}",
+                f"VirusTotal scanned: {self.vt_scanner.scanned_count}",
+                f"VirusTotal errors: {self.vt_scanner.error_count}",
             ]
+            if get_virustotal_api_key():
+                lines.append("VirusTotal: hash lookup only")
+            else:
+                lines.append("VirusTotal: no API key")
+            if self.remote_hash_capability_error:
+                lines.extend(["", "[bold yellow]Hash lookup note[/bold yellow]", self.remote_hash_capability_error[:500]])
             if self.remote_error:
                 lines.extend(["", "[bold red]Last error[/bold red]", self.remote_error[:900]])
             return Panel("\n".join(lines), title="Remote", border_style="magenta")
@@ -1253,7 +1485,8 @@ class ProcessMonitorApp:
             lines.append("[bold]Recent VT results[/bold]")
             for ev in recent:
                 if ev.get("type") == "vt_result":
-                    name = Path(str(ev.get("path", ""))).name
+                    label = str(ev.get("source") or ev.get("path") or ev.get("sha256") or "")
+                    name = Path(label).name if label else "hash"
                     lines.append(f"{name}: {ev.get('status')} det={ev.get('detections')}")
         return Panel("\n".join(lines), title="VirusTotal", border_style="magenta")
 

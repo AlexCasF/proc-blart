@@ -14,8 +14,8 @@ cleanup() {
 trap cleanup EXIT
 
 if [[ -e "$INSTALL_DIR" && "${FORCE:-}" != "1" ]]; then
-  if [[ ! -f "$INSTALL_DIR/install.sh" ]]; then
-    echo "Install directory already exists but does not contain install.sh: $INSTALL_DIR" >&2
+  if [[ ! -f "$INSTALL_DIR/scripts/install.sh" ]]; then
+    echo "Install directory already exists but does not contain scripts/install.sh: $INSTALL_DIR" >&2
     echo "Choose another INSTALL_DIR or rerun with FORCE=1." >&2
     exit 1
   fi
@@ -59,7 +59,7 @@ else
 fi
 
 echo "Running installer..."
-bash "$INSTALL_DIR/install.sh"
+bash "$INSTALL_DIR/scripts/install.sh"
 
 echo
 echo "Proc Blart is installed in: $INSTALL_DIR"

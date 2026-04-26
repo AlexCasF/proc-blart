@@ -17,9 +17,9 @@ $ZipPath = Join-Path $TempRoot "source.zip"
 $ExtractPath = Join-Path $TempRoot "source"
 
 if ((Test-Path $InstallDir) -and -not $Force) {
-    $Installer = Join-Path $InstallDir "install.ps1"
+    $Installer = Join-Path $InstallDir "scripts\install.ps1"
     if (-not (Test-Path $Installer)) {
-        throw "Install directory already exists but does not contain install.ps1: $InstallDir. Rerun with -Force or choose -InstallDir."
+        throw "Install directory already exists but does not contain scripts\install.ps1: $InstallDir. Rerun with -Force or choose -InstallDir."
     }
     Write-Host "Using existing install directory: $InstallDir"
 } else {
@@ -45,9 +45,9 @@ if ((Test-Path $InstallDir) -and -not $Force) {
     Move-Item -LiteralPath $SourceDir.FullName -Destination $InstallDir
 }
 
-$Installer = Join-Path $InstallDir "install.ps1"
+$Installer = Join-Path $InstallDir "scripts\install.ps1"
 if (-not (Test-Path $Installer)) {
-    throw "install.ps1 not found in $InstallDir"
+    throw "scripts\install.ps1 not found in $InstallDir"
 }
 
 Write-Host "Running installer..."

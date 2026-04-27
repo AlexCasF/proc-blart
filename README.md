@@ -98,8 +98,8 @@ Live controls:
 Read-only remote monitor for one Windows LAN host:
 
 ```powershell
-procblart run -remote 192.168.1.25
-procblart run --remote-ssh username@192.168.1.25
+procblart run -remote <TARGET_IP>
+procblart run --remote-ssh <USER>@<TARGET_IP>
 ```
 
 Remote mode does not kill, suspend, dump, or quarantine remote processes.
@@ -107,8 +107,8 @@ Remote mode does not kill, suspend, dump, or quarantine remote processes.
 `-remote` uses PowerShell CIM/WMI from the local machine. By default it tries WinRM/WSMan first and then DCOM/WMI as a fallback. Remote VirusTotal support is hash-lookup only: Proc Blart computes SHA-256 on the target and queries VirusTotal from the local machine. That requires WinRM/WSMan access even if process inventory falls back to DCOM/WMI. You can force one transport while troubleshooting:
 
 ```powershell
-procblart run -remote 192.168.1.25 --remote-transport wsman
-procblart run -remote 192.168.1.25 --remote-transport dcom
+procblart run -remote <TARGET_IP> --remote-transport wsman
+procblart run -remote <TARGET_IP> --remote-transport dcom
 ```
 
 The target must allow remote CIM/WMI access for your account.
@@ -127,8 +127,8 @@ Useful setup and checks for a lab LAN:
 Enable-PSRemoting -Force
 
 # On the Proc Blart computer, from elevated PowerShell, for workgroup/IP WinRM:
-Set-Item WSMan:\localhost\Client\TrustedHosts -Value "192.168.1.25" -Concatenate -Force
-Test-WSMan 192.168.1.25
+Set-Item WSMan:\localhost\Client\TrustedHosts -Value "<TARGET_IP>" -Concatenate -Force
+Test-WSMan <TARGET_IP>
 
 # If using the DCOM/WMI fallback, enable the target firewall group:
 Enable-NetFirewallRule -DisplayGroup "Windows Management Instrumentation (WMI)"
@@ -142,9 +142,9 @@ You can also use the PowerShell launcher:
 .\scripts\launch.ps1
 .\scripts\launch.ps1 -DryRun
 .\scripts\launch.ps1 -Execute
-.\scripts\launch.ps1 -Remote 192.168.1.25
-.\scripts\launch.ps1 -Remote 192.168.1.25 -RemoteTransport dcom
-.\scripts\launch.ps1 -RemoteSsh username@192.168.1.25
+.\scripts\launch.ps1 -Remote <TARGET_IP>
+.\scripts\launch.ps1 -Remote <TARGET_IP> -RemoteTransport dcom
+.\scripts\launch.ps1 -RemoteSsh <USER>@<TARGET_IP>
 ```
 
 Run the launcher in the current terminal instead of opening Windows Terminal panes:

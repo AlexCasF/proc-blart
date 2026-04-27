@@ -815,16 +815,17 @@ class VTScanner(threading.Thread):
         self.error_count = 0
         self._lock = threading.Lock()
 
-    def submit(self, path: str) -> None:
+    def submit(self, path: str) -> bool:
         if not path:
-            return
+            return False
         normalized = str(Path(path))
         with self._lock:
             queue_key = f"path:{normalized}"
             if queue_key in self.queued or normalized in self.results_by_path:
-                return
+                return False
             self.queued.add(queue_key)
         self.q.put(VTTodo(kind="path", value=normalized))
+        return True
 
     def get_result(self, path: str) -> VTResult:
         if not path:
@@ -833,16 +834,17 @@ class VTScanner(threading.Thread):
         with self._lock:
             return self.results_by_path.get(normalized, VTResult(status="queued"))
 
-    def submit_sha256(self, sha256: str, source: str = "") -> None:
+    def submit_sha256(self, sha256: str, source: str = "") -> bool:
         normalized = str(sha256 or "").strip().lower()
         if not normalized:
-            return
+            return False
         with self._lock:
             queue_key = f"sha256:{normalized}"
             if queue_key in self.queued or normalized in self.results_by_sha256:
-                return
+                return False
             self.queued.add(queue_key)
         self.q.put(VTTodo(kind="sha256", value=normalized, source=source))
+        return True
 
     def get_result_by_sha256(self, sha256: str) -> VTResult:
         normalized = str(sha256 or "").strip().lower()
@@ -1347,8 +1349,7 @@ class ProcessMonitorApp:
             except Exception:
                 continue
 
-            if exe and submitted_this_cycle < self.max_new_paths_per_cycle:
-                self.vt_scanner.submit(exe)
+            if exe and submitted_this_cycle < self.max_new_paths_per_cycle and self.vt_scanner.submit(exe):
                 submitted_this_cycle += 1
 
             vt_result = self.vt_scanner.get_result(exe)

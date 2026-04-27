@@ -93,6 +93,7 @@ Live controls:
 - `Home` / `End`: jump to the first or last row
 - `s`: cycle sort order
 - `r`: reverse the current sort
+- `q` / `Ctrl+X`: exit cleanly
 
 Read-only remote monitor for one Windows LAN host:
 

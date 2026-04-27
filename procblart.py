@@ -1208,6 +1208,7 @@ class ProcessMonitorApp:
         self.start_time = time.time()
         self.max_new_paths_per_cycle = int(vt_cfg.get("max_new_paths_per_cycle", 4))
         self.frozen = threading.Event()
+        self.stop_requested = threading.Event()
         self.needs_render = threading.Event()
         self.scroll_offset = 0
         self.sort_mode_index = 0
@@ -1235,6 +1236,11 @@ class ProcessMonitorApp:
         self.remote_hash_capability_error = ""
 
     def handle_key(self, key: str) -> None:
+        if key.lower() == "q" or key == "\x18":
+            self.stop_requested.set()
+            self.needs_render.set()
+            return
+
         if key == "space":
             if self.frozen.is_set():
                 self.frozen.clear()
@@ -1300,7 +1306,7 @@ class ProcessMonitorApp:
         try:
             with Live(self._render(), console=self.console, refresh_per_second=2, screen=True, auto_refresh=False) as live:
                 last_frozen_state = self.frozen.is_set()
-                while True:
+                while not self.stop_requested.is_set():
                     frozen = self.frozen.is_set()
                     if not frozen:
                         self.rows = self._collect_processes()
@@ -1314,6 +1320,9 @@ class ProcessMonitorApp:
                     time.sleep(float(self.args.interval))
         finally:
             self.keyboard.stop()
+            self.vt_scanner.running = False
+            if self.vt_scanner.is_alive():
+                self.vt_scanner.join(timeout=1)
 
     def _collect_processes(self) -> list[ProcessRow]:
         if self.remote_collector:
@@ -1549,7 +1558,7 @@ class ProcessMonitorApp:
         freeze = "[bold cyan]FROZEN[/bold cyan] | Space resume" if self.frozen.is_set() else "Space freeze"
         text = (
             f"[bold]{APP_NAME}[/bold] | source: {source} | mode: {mode} | VT: {api} | "
-            f"queue: {self.vt_scanner.queue_size} | uptime: {uptime}s | {freeze} | PgUp/PgDn scroll | s sort | r reverse | Ctrl+C exit"
+            f"queue: {self.vt_scanner.queue_size} | uptime: {uptime}s | {freeze} | PgUp/PgDn scroll | s sort | r reverse | q/Ctrl+X exit"
         )
         return Panel(Align.left(text), box=box.SIMPLE)
 

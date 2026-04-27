@@ -36,6 +36,8 @@ DEFAULT_WORKDIR = Path.cwd() / "procblart_data"
 VT_FILE_REPORT_URL = "https://www.virustotal.com/api/v3/files/{sha256}"
 VT_UPLOAD_URL = "https://www.virustotal.com/api/v3/files"
 MB = 1024 * 1024
+VT_TRANSIENT_STATUSES = {"rate-limit", "timeout", "network-error", "api-error", "error"}
+VT_RETRY_SECONDS = 300
 SORT_MODES = [
     ("memory", "Mem MB", True),
     ("cpu", "CPU %", True),
@@ -109,7 +111,7 @@ DEFAULT_POLICY: dict[str, Any] = {
 
 @dataclass
 class VTResult:
-    status: str = "pending"  # disabled, queued, pending, clean, suspicious, malicious, unknown, submitted, remote, error
+    status: str = "pending"  # disabled, queued, pending, clean, suspicious, malicious, unknown, submitted, remote, rate-limit, timeout, network-error, api-error, error
     sha256: str | None = None
     malicious: int = 0
     suspicious: int = 0
@@ -167,6 +169,22 @@ class VTTodo:
     kind: str
     value: str
     source: str = ""
+
+
+def is_transient_vt_status(status: str) -> bool:
+    return status in VT_TRANSIENT_STATUSES
+
+
+def should_retry_vt_result(result: VTResult) -> bool:
+    if not is_transient_vt_status(result.status):
+        return False
+    if not result.checked_at:
+        return True
+    try:
+        checked_at = dt.datetime.fromisoformat(result.checked_at)
+    except ValueError:
+        return True
+    return (dt.datetime.now(dt.timezone.utc) - checked_at).total_seconds() >= VT_RETRY_SECONDS
 
 
 def powershell_single_quote(value: str) -> str:
@@ -695,7 +713,8 @@ class VirusTotalClient:
         if result.status == "unknown" and self.upload_unknown_files:
             result = self._upload_file_for_analysis(p, sha256)
 
-        self._cache_set(sha256, result)
+        if not is_transient_vt_status(result.status):
+            self._cache_set(sha256, result)
         return result
 
     def lookup_sha256(self, sha256: str) -> VTResult:
@@ -709,7 +728,8 @@ class VirusTotalClient:
             return cached
 
         result = self._get_file_report(sha256)
-        self._cache_set(sha256, result)
+        if not is_transient_vt_status(result.status):
+            self._cache_set(sha256, result)
         return result
 
     def _cache_get(self, sha256: str) -> VTResult | None:
@@ -748,7 +768,9 @@ class VirusTotalClient:
             if r.status_code == 404:
                 return VTResult(status="unknown", sha256=sha256, message="Hash not found in VirusTotal")
             if r.status_code == 429:
-                return VTResult(status="error", sha256=sha256, message="VirusTotal rate limit reached")
+                return VTResult(status="rate-limit", sha256=sha256, message="VirusTotal rate limit reached", checked_at=utc_now())
+            if 500 <= r.status_code < 600:
+                return VTResult(status="api-error", sha256=sha256, message=f"VirusTotal server error HTTP {r.status_code}", checked_at=utc_now())
             r.raise_for_status()
             data = r.json()
             attrs = data.get("data", {}).get("attributes", {})
@@ -771,8 +793,12 @@ class VirusTotalClient:
                 undetected=undetected,
                 checked_at=utc_now(),
             )
+        except requests.Timeout as e:
+            return VTResult(status="timeout", sha256=sha256, message=str(e), checked_at=utc_now())
+        except requests.RequestException as e:
+            return VTResult(status="network-error", sha256=sha256, message=str(e), checked_at=utc_now())
         except Exception as e:
-            return VTResult(status="error", sha256=sha256, message=str(e), checked_at=utc_now())
+            return VTResult(status="api-error", sha256=sha256, message=str(e), checked_at=utc_now())
 
     def _upload_file_for_analysis(self, path: Path, sha256: str) -> VTResult:
         try:
@@ -788,7 +814,9 @@ class VirusTotalClient:
                 files = {"file": (path.name, f)}
                 r = self._request_rate_limited("POST", VT_UPLOAD_URL, files=files)
             if r.status_code == 429:
-                return VTResult(status="error", sha256=sha256, message="VirusTotal rate limit reached")
+                return VTResult(status="rate-limit", sha256=sha256, message="VirusTotal rate limit reached", checked_at=utc_now())
+            if 500 <= r.status_code < 600:
+                return VTResult(status="api-error", sha256=sha256, message=f"VirusTotal server error HTTP {r.status_code}", checked_at=utc_now())
             r.raise_for_status()
             analysis_id = r.json().get("data", {}).get("id", "")
             return VTResult(
@@ -797,8 +825,12 @@ class VirusTotalClient:
                 message=f"Submitted to VirusTotal; analysis id: {analysis_id}",
                 checked_at=utc_now(),
             )
+        except requests.Timeout as e:
+            return VTResult(status="timeout", sha256=sha256, message=f"Upload timed out: {e}", checked_at=utc_now())
+        except requests.RequestException as e:
+            return VTResult(status="network-error", sha256=sha256, message=f"Upload failed: {e}", checked_at=utc_now())
         except Exception as e:
-            return VTResult(status="error", sha256=sha256, message=f"Upload failed: {e}", checked_at=utc_now())
+            return VTResult(status="api-error", sha256=sha256, message=f"Upload failed: {e}", checked_at=utc_now())
 
 
 class VTScanner(threading.Thread):
@@ -821,8 +853,11 @@ class VTScanner(threading.Thread):
         normalized = str(Path(path))
         with self._lock:
             queue_key = f"path:{normalized}"
-            if queue_key in self.queued or normalized in self.results_by_path:
+            existing = self.results_by_path.get(normalized)
+            if queue_key in self.queued or (existing and not should_retry_vt_result(existing)):
                 return False
+            if existing and should_retry_vt_result(existing):
+                self.results_by_path.pop(normalized, None)
             self.queued.add(queue_key)
         self.q.put(VTTodo(kind="path", value=normalized))
         return True
@@ -840,8 +875,11 @@ class VTScanner(threading.Thread):
             return False
         with self._lock:
             queue_key = f"sha256:{normalized}"
-            if queue_key in self.queued or normalized in self.results_by_sha256:
+            existing = self.results_by_sha256.get(normalized)
+            if queue_key in self.queued or (existing and not should_retry_vt_result(existing)):
                 return False
+            if existing and should_retry_vt_result(existing):
+                self.results_by_sha256.pop(normalized, None)
             self.queued.add(queue_key)
         self.q.put(VTTodo(kind="sha256", value=normalized, source=source))
         return True
@@ -863,12 +901,14 @@ class VTScanner(threading.Thread):
                 result = self.client.lookup_sha256(item.value)
                 with self._lock:
                     self.results_by_sha256[item.value] = result
+                    self.queued.discard(f"sha256:{item.value}")
             else:
                 result = self.client.lookup_path(item.value)
                 with self._lock:
                     self.results_by_path[item.value] = result
+                    self.queued.discard(f"path:{item.value}")
             self.scanned_count += 1
-            if result.status == "error":
+            if is_transient_vt_status(result.status):
                 self.error_count += 1
             event = {
                 "type": "vt_result",
@@ -1701,8 +1741,14 @@ class ProcessMonitorApp:
             return "[dim]disabled[/dim]"
         if vt.status == "remote":
             return "[dim]remote[/dim]"
-        if vt.status == "error":
-            return "[red]error[/red]"
+        if vt.status == "rate-limit":
+            return "[yellow]rate[/yellow]"
+        if vt.status == "timeout":
+            return "[yellow]timeout[/yellow]"
+        if vt.status == "network-error":
+            return "[yellow]network[/yellow]"
+        if vt.status in {"api-error", "error"}:
+            return "[red]api[/red]"
         return "[dim]unknown[/dim]"
 
 

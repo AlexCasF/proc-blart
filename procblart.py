@@ -682,9 +682,27 @@ class VirusTotalClient:
         if not self.cache_path.exists():
             return {}
         try:
-            return json.loads(self.cache_path.read_text(encoding="utf-8"))
+            raw = json.loads(self.cache_path.read_text(encoding="utf-8"))
         except Exception:
             return {}
+        normalized: dict[str, dict[str, Any]] = {}
+        for key, entry in raw.items():
+            normalized_key = str(key).strip().lower()
+            if not normalized_key:
+                continue
+            if isinstance(entry, dict) and isinstance(entry.get("result"), dict):
+                entry["result"]["sha256"] = normalized_key
+            existing = normalized.get(normalized_key)
+            result = VTResult.from_json(entry.get("result", {}))
+            if existing:
+                existing_result = VTResult.from_json(existing.get("result", {}))
+                if is_transient_vt_status(existing_result.status) and not is_transient_vt_status(result.status):
+                    normalized[normalized_key] = entry
+                elif float(entry.get("_epoch", 0)) > float(existing.get("_epoch", 0)):
+                    normalized[normalized_key] = entry
+            else:
+                normalized[normalized_key] = entry
+        return normalized
 
     def _save_cache(self) -> None:
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -718,6 +736,7 @@ class VirusTotalClient:
         return result
 
     def lookup_sha256(self, sha256: str) -> VTResult:
+        sha256 = str(sha256 or "").strip().lower()
         if not self.api_key:
             return VTResult(status="disabled", sha256=sha256, message="No VIRUSTOTAL_API_KEY set")
         if not sha256:
@@ -739,9 +758,14 @@ class VirusTotalClient:
         ts = float(entry.get("_epoch", 0))
         if time.time() - ts > self.cache_ttl_seconds:
             return None
-        return VTResult.from_json(entry["result"])
+        result = VTResult.from_json(entry["result"])
+        if is_transient_vt_status(result.status):
+            return None
+        result.sha256 = sha256
+        return result
 
     def _cache_set(self, sha256: str, result: VTResult) -> None:
+        sha256 = str(sha256 or "").strip().lower()
         result.sha256 = sha256
         self.cache[sha256] = {"_epoch": time.time(), "result": result.to_json()}
         try:
